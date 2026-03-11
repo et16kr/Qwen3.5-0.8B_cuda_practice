@@ -1,0 +1,2 @@
+Qwen3.5의 linear attention 구조를 짧게 설명해 주세요.
+CUDA 커널 최적화 학습 순서를 제안해 주세요.
