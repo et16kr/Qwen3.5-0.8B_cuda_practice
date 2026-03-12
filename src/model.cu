@@ -228,6 +228,17 @@ void apply_mlp(const LayerWeights &layer) {
   std::swap(x, residual);
 }
 
+void apply_mlp_gpu(const LayerWeights &layer) {
+  QwenRMSNorm_gpu(x, layer.post_attn_norm_weight, norm_buf, config_.rms_norm_eps);
+  Linear_gpu(norm_buf, layer.mlp_gate_weight, gate_buf);
+  Linear_gpu(norm_buf, layer.mlp_up_weight, up_buf);
+  SiLU_gpu(gate_buf);
+  ElementwiseMul_gpu(gate_buf, up_buf, gated_buf);
+  Linear_gpu(gated_buf, layer.mlp_down_weight, mlp_out);
+  ResidualAdd_gpu(x, mlp_out, residual);
+  std::swap(x, residual);
+}
+
 void full_attention_block(const LayerWeights &layer) {
   QwenRMSNorm(x, layer.input_norm_weight, norm_buf, config_.rms_norm_eps);
 
@@ -260,6 +271,42 @@ void full_attention_block(const LayerWeights &layer) {
   std::swap(x, residual);
 
   apply_mlp(layer);
+}
+
+void full_attention_block_gpu(const LayerWeights &layer) {
+  QwenRMSNorm_gpu(x, layer.input_norm_weight, norm_buf, config_.rms_norm_eps);
+
+  Linear_gpu(norm_buf, layer.q_proj_weight, q_proj_raw);
+  SplitQwenQProj_gpu(q_proj_raw, q_flat, att_gate, config_.num_attention_heads,
+                     config_.head_dim);
+  Linear_gpu(norm_buf, layer.k_proj_weight, k_flat);
+  Linear_gpu(norm_buf, layer.v_proj_weight, v_flat);
+
+  SplitHeads_gpu(q_flat, q_heads, config_.num_attention_heads, config_.head_dim);
+  SplitHeads_gpu(k_flat, k_heads, config_.num_key_value_heads, config_.head_dim);
+  SplitHeads_gpu(v_flat, v_heads, config_.num_key_value_heads, config_.head_dim);
+
+  QwenRMSNorm_gpu(q_heads, layer.q_norm_weight, q_heads, config_.rms_norm_eps);
+  QwenRMSNorm_gpu(k_heads, layer.k_norm_weight, k_heads, config_.rms_norm_eps);
+  ApplyPartialMRoPE_gpu(q_heads, k_heads, config_);
+
+  AttentionScoresGrouped_gpu(q_heads, k_heads, att_scores,
+                             config_.num_attention_heads,
+                             config_.num_key_value_heads);
+  ScaleMaskSoftmax_gpu(att_scores, att_probs, config_.head_dim, current_tokens);
+  AttentionContextGrouped_gpu(att_probs, v_heads, context,
+                              config_.num_attention_heads,
+                              config_.num_key_value_heads);
+  MergeHeads_gpu(context, merged);
+
+  Sigmoid_gpu(att_gate);
+  ElementwiseMul_gpu(merged, att_gate, q_flat);
+  Linear_gpu(q_flat, layer.o_proj_weight, attn_out);
+
+  ResidualAdd_gpu(x, attn_out, residual);
+  std::swap(x, residual);
+
+  apply_mlp_gpu(layer);
 }
 
 void linear_attention_block(const LayerWeights &layer) {
@@ -298,12 +345,59 @@ void linear_attention_block(const LayerWeights &layer) {
   apply_mlp(layer);
 }
 
+void linear_attention_block_gpu(const LayerWeights &layer) {
+  QwenRMSNorm_gpu(x, layer.input_norm_weight, norm_buf, config_.rms_norm_eps);
+  MaskPaddingHiddenStates_gpu(norm_buf, masked_hidden, current_tokens);
+
+  Linear_gpu(masked_hidden, layer.linear_in_proj_qkv, linear_qkv);
+  DepthwiseConv1dCausal_gpu(linear_qkv, layer.linear_conv1d_weight, linear_conv,
+                            config_.linear_conv_kernel_dim);
+  SplitLinearQKV_gpu(linear_conv, linear_query, linear_key, linear_value,
+                     config_.linear_num_key_heads, config_.linear_key_head_dim,
+                     config_.linear_num_value_heads,
+                     config_.linear_value_head_dim);
+
+  Linear_gpu(masked_hidden, layer.linear_in_proj_z, linear_z_flat);
+  SplitHeads_gpu(linear_z_flat, linear_z, config_.linear_num_value_heads,
+                 config_.linear_value_head_dim);
+
+  Linear_gpu(masked_hidden, layer.linear_in_proj_a, linear_a_proj);
+  Linear_gpu(masked_hidden, layer.linear_in_proj_b, linear_b_proj);
+  SplitHeadScalars_gpu(linear_a_proj, linear_a);
+  SplitHeadScalars_gpu(linear_b_proj, linear_beta);
+
+  PrepareLinearDecay_gpu(linear_a, layer.linear_a_log, layer.linear_dt_bias,
+                         linear_g);
+  Sigmoid_gpu(linear_beta);
+  DeltaStateScan_gpu(linear_query, linear_key, linear_value, linear_g, linear_beta,
+                     linear_context, current_tokens);
+
+  QwenRMSNormGated_gpu(linear_context, linear_z, layer.linear_norm_weight,
+                       linear_out_heads, config_.rms_norm_eps);
+  MergeHeads_gpu(linear_out_heads, linear_merged);
+  Linear_gpu(linear_merged, layer.linear_out_proj, attn_out);
+
+  ResidualAdd_gpu(x, attn_out, residual);
+  std::swap(x, residual);
+
+  apply_mlp_gpu(layer);
+}
+
 void transformer_block(size_t layer_idx) {
   const LayerWeights &layer = layers_[layer_idx];
   if (layer.type == QwenLayerType::kFullAttention) {
     full_attention_block(layer);
   } else {
     linear_attention_block(layer);
+  }
+}
+
+void transformer_block_gpu(size_t layer_idx) {
+  const LayerWeights &layer = layers_[layer_idx];
+  if (layer.type == QwenLayerType::kFullAttention) {
+    full_attention_block_gpu(layer);
+  } else {
+    linear_attention_block_gpu(layer);
   }
 }
 
@@ -322,6 +416,20 @@ void qwen_forward_cpu(TokenBatch *tokens, Tensor *logits) {
   LMHead(final_norm, tok_embeddings, logits);
 }
 
+void qwen_forward_gpu(TokenBatch *tokens, Tensor *logits) {
+  CHECK_ERROR(tokens->B == current_batch && tokens->T == current_seq,
+              "Token batch shape differs from allocated activations");
+  CHECK_ERROR(logits->shape[0] == tokens->B && logits->shape[1] == tokens->T &&
+                  logits->shape[2] == config_.vocab_size,
+              "Logits tensor shape mismatch");
+
+  EmbeddingLookup_gpu(tokens, tok_embeddings, x);
+  for (size_t layer_idx = 0; layer_idx < config_.num_hidden_layers; ++layer_idx) {
+    transformer_block_gpu(layer_idx);
+  }
+  QwenRMSNorm_gpu(x, final_norm_weight, final_norm, config_.rms_norm_eps);
+  LMHead_gpu(final_norm, tok_embeddings, logits);
+}
 }  // namespace
 
 TokenBatch load_tokens(const char *path) {
@@ -471,10 +579,10 @@ void alloc_activations(size_t batch_size, size_t seq_len) {
 
 void qwen_forward(TokenBatch *tokens, Tensor *logits) {
   current_tokens = tokens;
-  qwen_forward_cpu(tokens, logits);
+  qwen_forward_gpu(tokens, logits);
   current_tokens = nullptr;
 
-  // TODO(student): Replace the CPU path with GPU kernels layer by layer.
+  // TODO(student): Replace the CPU-backed layer wrappers with CUDA kernels.
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 

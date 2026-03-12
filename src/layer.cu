@@ -230,32 +230,6 @@ void Linear_gpu(Tensor *input, Tensor *weight, Tensor *output) {
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
-void SplitTensorLastDim(Tensor *input, size_t left_size, Tensor *left, Tensor *right) {
-  const size_t rows = flat_rows(input);
-  const size_t cols = last_dim(input);
-  CHECK_ERROR(left_size <= cols, "SplitTensorLastDim split exceeds last dimension");
-  const size_t right_size = cols - left_size;
-  CHECK_ERROR(left->num_elem() == rows * left_size,
-              "SplitTensorLastDim left shape mismatch");
-  CHECK_ERROR(right->num_elem() == rows * right_size,
-              "SplitTensorLastDim right shape mismatch");
-
-#pragma omp parallel for
-  for (size_t row = 0; row < rows; ++row) {
-    const float *src = input->buf + row * cols;
-    float *dst_left = left->buf + row * left_size;
-    float *dst_right = right->buf + row * right_size;
-    std::memcpy(dst_left, src, left_size * sizeof(float));
-    std::memcpy(dst_right, src + left_size, right_size * sizeof(float));
-  }
-}
-
-void SplitTensorLastDim_gpu(Tensor *input, size_t left_size, Tensor *left,
-                            Tensor *right) {
-  SplitTensorLastDim(input, left_size, left, right);
-  CHECK_CUDA(cudaDeviceSynchronize());
-}
-
 void SplitHeads(Tensor *input, Tensor *output, size_t num_heads, size_t head_dim) {
   CHECK_ERROR(input->ndim == 3 && output->ndim == 4, "SplitHeads rank mismatch");
   CHECK_ERROR(input->shape[0] == output->shape[0] &&
@@ -381,6 +355,12 @@ void SplitQwenQProj(Tensor *input, Tensor *query, Tensor *gate, size_t num_heads
       }
     }
   }
+}
+
+void SplitQwenQProj_gpu(Tensor *input, Tensor *query, Tensor *gate, size_t num_heads,
+                        size_t head_dim) {
+  SplitQwenQProj(input, query, gate, num_heads, head_dim);
+  CHECK_CUDA(cudaDeviceSynchronize());
 }
 
 void ApplyPartialMRoPE(Tensor *q, Tensor *k, const QwenConfig &config) {

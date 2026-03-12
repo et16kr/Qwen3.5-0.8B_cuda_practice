@@ -21,10 +21,6 @@ void MaskPaddingHiddenStates_gpu(Tensor *input, Tensor *output,
 void Linear(Tensor *input, Tensor *weight, Tensor *output);
 void Linear_gpu(Tensor *input, Tensor *weight, Tensor *output);
 
-void SplitTensorLastDim(Tensor *input, size_t left_size, Tensor *left, Tensor *right);
-void SplitTensorLastDim_gpu(Tensor *input, size_t left_size, Tensor *left,
-                            Tensor *right);
-
 void SplitHeads(Tensor *input, Tensor *output, size_t num_heads, size_t head_dim);
 void SplitHeads_gpu(Tensor *input, Tensor *output, size_t num_heads,
                     size_t head_dim);
@@ -41,6 +37,8 @@ void SplitLinearQKV_gpu(Tensor *input, Tensor *query, Tensor *key, Tensor *value
 
 void SplitQwenQProj(Tensor *input, Tensor *query, Tensor *gate, size_t num_heads,
                     size_t head_dim);
+void SplitQwenQProj_gpu(Tensor *input, Tensor *query, Tensor *gate, size_t num_heads,
+                        size_t head_dim);
 
 void ApplyPartialMRoPE(Tensor *q, Tensor *k, const QwenConfig &config);
 void ApplyPartialMRoPE_gpu(Tensor *q, Tensor *k, const QwenConfig &config);
