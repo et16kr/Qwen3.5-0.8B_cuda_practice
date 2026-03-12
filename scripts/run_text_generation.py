@@ -38,13 +38,21 @@ def load_requests(args: argparse.Namespace) -> list[str]:
     return args.input.read_text(encoding="utf-8").splitlines()
 
 
+def resolve_main_binary(path: Path) -> Path:
+    if path.is_absolute():
+        return path
+    return (Path.cwd() / path).resolve()
+
+
 def load_tokenizer(model_dir: Path):
     try:
         from transformers import AutoTokenizer
     except ImportError as exc:
         raise RuntimeError(
             "transformers is required for text generation wrapper. "
-            "Install: pip install transformers tokenizers"
+            "Install: pip install -U "
+            "\"transformers @ git+https://github.com/huggingface/transformers.git@main\" "
+            "tokenizers jinja2"
         ) from exc
 
     return AutoTokenizer.from_pretrained(
@@ -137,7 +145,7 @@ def write_responses(path: Path, requests: list[str], responses: list[str]) -> No
 
 def run_main(args: argparse.Namespace, prompt_tokens: Path, output_tokens: Path) -> None:
     cmd = [
-        str(args.main_binary),
+        str(resolve_main_binary(args.main_binary)),
         "-m",
         str(args.model_dir),
         "--token-input",

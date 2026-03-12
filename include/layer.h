@@ -39,6 +39,9 @@ void SplitLinearQKV_gpu(Tensor *input, Tensor *query, Tensor *key, Tensor *value
                         size_t num_k_heads, size_t head_k_dim,
                         size_t num_v_heads, size_t head_v_dim);
 
+void SplitQwenQProj(Tensor *input, Tensor *query, Tensor *gate, size_t num_heads,
+                    size_t head_dim);
+
 void ApplyPartialMRoPE(Tensor *q, Tensor *k, const QwenConfig &config);
 void ApplyPartialMRoPE_gpu(Tensor *q, Tensor *k, const QwenConfig &config);
 

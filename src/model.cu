@@ -232,7 +232,8 @@ void full_attention_block(const LayerWeights &layer) {
   QwenRMSNorm(x, layer.input_norm_weight, norm_buf, config_.rms_norm_eps);
 
   Linear(norm_buf, layer.q_proj_weight, q_proj_raw);
-  SplitTensorLastDim(q_proj_raw, config_.full_q_hidden(), q_flat, att_gate);
+  SplitQwenQProj(q_proj_raw, q_flat, att_gate, config_.num_attention_heads,
+                 config_.head_dim);
   Linear(norm_buf, layer.k_proj_weight, k_flat);
   Linear(norm_buf, layer.v_proj_weight, v_flat);
 

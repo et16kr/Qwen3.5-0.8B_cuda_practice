@@ -352,6 +352,37 @@ void SplitLinearQKV_gpu(Tensor *input, Tensor *query, Tensor *key, Tensor *value
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
+void SplitQwenQProj(Tensor *input, Tensor *query, Tensor *gate, size_t num_heads,
+                    size_t head_dim) {
+  CHECK_ERROR(input->ndim == 3, "SplitQwenQProj expects rank-3 input");
+  CHECK_ERROR(query->ndim == 3 && gate->ndim == 3,
+              "SplitQwenQProj expects rank-3 outputs");
+  const size_t B = input->shape[0];
+  const size_t T = input->shape[1];
+  const size_t hidden = num_heads * head_dim;
+  CHECK_ERROR(input->shape[2] == hidden * 2, "SplitQwenQProj hidden mismatch");
+  CHECK_ERROR(query->shape[0] == B && query->shape[1] == T && query->shape[2] == hidden,
+              "SplitQwenQProj query shape mismatch");
+  CHECK_ERROR(gate->shape[0] == B && gate->shape[1] == T && gate->shape[2] == hidden,
+              "SplitQwenQProj gate shape mismatch");
+
+#pragma omp parallel for collapse(2)
+  for (size_t b = 0; b < B; ++b) {
+    for (size_t t = 0; t < T; ++t) {
+      const float *src = input->buf + (b * T + t) * hidden * 2;
+      float *dst_q = query->buf + (b * T + t) * hidden;
+      float *dst_g = gate->buf + (b * T + t) * hidden;
+      for (size_t h = 0; h < num_heads; ++h) {
+        const size_t src_base = h * head_dim * 2;
+        const size_t dst_base = h * head_dim;
+        std::memcpy(dst_q + dst_base, src + src_base, head_dim * sizeof(float));
+        std::memcpy(dst_g + dst_base, src + src_base + head_dim,
+                    head_dim * sizeof(float));
+      }
+    }
+  }
+}
+
 void ApplyPartialMRoPE(Tensor *q, Tensor *k, const QwenConfig &config) {
   CHECK_ERROR(q->ndim == 4 && k->ndim == 4, "ApplyPartialMRoPE expects rank-4");
   CHECK_ERROR(q->shape[2] == k->shape[2] && q->shape[3] == k->shape[3],
@@ -514,7 +545,7 @@ void DepthwiseConv1dCausal(Tensor *input, Tensor *weight, Tensor *output,
           }
           const size_t src_t = t - k;
           const float x = input->buf[(b * T + src_t) * C + c];
-          const float w = weight->buf[c * kernel_size + k];
+          const float w = weight->buf[c * kernel_size + (kernel_size - 1 - k)];
           sum += x * w;
         }
         output->buf[(b * T + t) * C + c] = sum / (1.0f + std::exp(-sum));

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -35,6 +36,105 @@ std::vector<int> read_eos_ids(const nlohmann::json &obj) {
     return value.get<std::vector<int>>();
   }
   return {value.get<int>()};
+}
+
+std::optional<std::string> read_special_token_content(const nlohmann::json &obj,
+                                                      const char *key) {
+  if (!obj.contains(key) || obj.at(key).is_null()) {
+    return std::nullopt;
+  }
+
+  const nlohmann::json &value = obj.at(key);
+  if (value.is_string()) {
+    return value.get<std::string>();
+  }
+  if (value.is_object() && value.contains("content") &&
+      value.at("content").is_string()) {
+    return value.at("content").get<std::string>();
+  }
+  return std::nullopt;
+}
+
+std::optional<int> parse_decoder_key(const std::string &key) {
+  try {
+    return std::stoi(key);
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
+std::optional<int> find_added_token_id(const nlohmann::json &decoder,
+                                       const std::string &content) {
+  if (!decoder.is_object()) {
+    return std::nullopt;
+  }
+
+  for (auto it = decoder.begin(); it != decoder.end(); ++it) {
+    if (!it.value().is_object()) {
+      continue;
+    }
+    const std::optional<std::string> added_content =
+        read_special_token_content(it.value(), "content");
+    if (!added_content.has_value() || added_content.value() != content) {
+      continue;
+    }
+    return parse_decoder_key(it.key());
+  }
+
+  return std::nullopt;
+}
+
+std::string model_dir_from_config_path(const char *path) {
+  const std::string config_path(path);
+  const size_t pos = config_path.find_last_of("/\\");
+  if (pos == std::string::npos) {
+    return ".";
+  }
+  return config_path.substr(0, pos);
+}
+
+void maybe_override_special_tokens(QwenConfig *cfg, const char *config_path) {
+  const std::string tokenizer_path =
+      model_dir_from_config_path(config_path) + "/tokenizer_config.json";
+  std::ifstream tokenizer_input(tokenizer_path);
+  if (!tokenizer_input) {
+    return;
+  }
+
+  nlohmann::json tokenizer_json;
+  tokenizer_input >> tokenizer_json;
+  const nlohmann::json decoder =
+      tokenizer_json.value("added_tokens_decoder", nlohmann::json::object());
+
+  const std::optional<std::string> eos_content =
+      read_special_token_content(tokenizer_json, "eos_token");
+  if (eos_content.has_value()) {
+    const std::optional<int> eos_id =
+        find_added_token_id(decoder, eos_content.value());
+    if (eos_id.has_value()) {
+      cfg->eos_token_ids = {eos_id.value()};
+    }
+  }
+
+  const std::optional<std::string> pad_content =
+      read_special_token_content(tokenizer_json, "pad_token");
+  if (pad_content.has_value()) {
+    const std::optional<int> pad_id =
+        find_added_token_id(decoder, pad_content.value());
+    if (pad_id.has_value()) {
+      cfg->pad_token_id = pad_id.value();
+    }
+  }
+
+  const std::optional<std::string> bos_content =
+      read_special_token_content(tokenizer_json, "bos_token");
+  if (bos_content.has_value()) {
+    const std::optional<int> bos_id =
+        find_added_token_id(decoder, bos_content.value());
+    if (bos_id.has_value()) {
+      cfg->bos_token_id = bos_id.value();
+    }
+  }
 }
 
 QwenLayerType parse_layer_type(const std::string &name) {
@@ -127,6 +227,8 @@ QwenConfig load_qwen_config(const char *path) {
         read_optional<bool>(rope, "mrope_interleaved", false);
     cfg.mrope_section = read_optional<std::vector<int>>(rope, "mrope_section", {});
   }
+
+  maybe_override_special_tokens(&cfg, path);
 
   if (cfg.vocab_size == 0 || cfg.hidden_size == 0 || cfg.intermediate_size == 0 ||
       cfg.num_hidden_layers == 0 || cfg.num_attention_heads == 0 ||
